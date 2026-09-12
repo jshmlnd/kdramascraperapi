@@ -128,13 +128,45 @@ function isBrowserDeadError(e) {
 async function getSharedContext(playwright) {
   const browser = await getBrowser(playwright);
   if (!_sharedContextPromise) {
-    _sharedContextPromise = browser.newContext({ userAgent: BROWSER_UA }).catch((e) => {
-      _sharedContextPromise = null;
-      if (isBrowserDeadError(e)) resetBrowserState();
-      throw e;
-    });
+    _sharedContextPromise = browser
+      .newContext({ userAgent: BROWSER_UA })
+      .then(async (ctx) => {
+        // mint pages only need document+scripts+API calls: abort dead weight
+        // so episode pages load in a fraction of the time.
+        await ctx
+          .route('**/*', (route) => {
+            const t = route.request().resourceType();
+            if (['image', 'media', 'font', 'stylesheet'].includes(t)) return route.abort();
+            return route.continue();
+          })
+          .catch(() => {});
+        return ctx;
+      })
+      .catch((e) => {
+        _sharedContextPromise = null;
+        if (isBrowserDeadError(e)) resetBrowserState();
+        throw e;
+      });
   }
   return { browser, context: await _sharedContextPromise };
+}
+
+// Best-effort browser warmup at server boot: pays Chromium launch + context
+// creation before the first mint needs it. Silent no-op without Playwright.
+async function warmBrowser() {
+  let playwright;
+  try {
+    playwright = require('playwright');
+  } catch {
+    return false;
+  }
+  try {
+    await getSharedContext(playwright);
+    return true;
+  } catch (e) {
+    console.warn('[warmBrowser] skipped:', e.message);
+    return false;
+  }
 }
 
 process.once('exit', () => {
@@ -323,10 +355,18 @@ async function mintKkeys({ pageUrl, timeoutMs = 30000 }) {
       if (u.pathname.includes('/api/Sub/') && !found.subKey) found.subKey = kkey;
     });
     await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: timeoutMs }).catch(() => {});
-    // wait until both keys seen (or timeout) – page JS fires the API calls on load
-    const deadline = Date.now() + timeoutMs;
-    while ((!found.streamKey || !found.subKey) && Date.now() < deadline) {
-      await page.waitForTimeout(500).catch(() => new Promise((r) => setTimeout(r, 500)));
+    // Return fast: once the stream key lands, give the sub key only a short
+    // grace period (KKEY_SUB_GRACE_MS, default 4s) instead of the full timeout.
+    // Frontend can start playback on streamKey immediately and retry for subs.
+    const graceMs = Number(process.env.KKEY_SUB_GRACE_MS) || 4000;
+    const t0 = Date.now();
+    let streamAt = 0;
+    for (;;) {
+      if (found.streamKey && !streamAt) streamAt = Date.now();
+      if (found.streamKey && found.subKey) break;
+      if (streamAt && Date.now() - streamAt > graceMs) break;
+      if (Date.now() - t0 > timeoutMs) break;
+      await page.waitForTimeout(250).catch(() => new Promise((r) => setTimeout(r, 250)));
     }
     return { streamKey: found.streamKey || null, subKey: found.subKey || null, pageUrl };
   } catch (e) {
@@ -409,4 +449,4 @@ async function scrape(opts) {
   return results;
 }
 
-module.exports = { http, fetchStatic, fetchRendered, fetchHtml, scrape, extractField, isSafeUrl, closeBrowser, mintKkeys, slugify, episodePageUrl, checkMediaSrc, rewritePlaylist, proxyPlaylistUrls, filterSubtitles, subMatchesLang };
+module.exports = { http, fetchStatic, fetchRendered, fetchHtml, scrape, extractField, isSafeUrl, closeBrowser, mintKkeys, slugify, episodePageUrl, checkMediaSrc, rewritePlaylist, proxyPlaylistUrls, filterSubtitles, subMatchesLang, warmBrowser, getSharedContext, getBrowser };

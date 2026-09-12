@@ -375,7 +375,7 @@ app.get('/', (_req, res) => {
           method: 'GET',
           path: '/api/kkey',
           kind: 'api',
-          description: 'Mint stream/sub kkeys – GET /api/kkey?dramaId=8409&epsId=144044 or ?dramaId=8409&ep=1 (needs Playwright)',
+          description: 'Mint stream/sub kkeys – GET /api/kkey?dramaId=8409&epsId=144044 or ?dramaId=8409&ep=1 (needs Playwright; partial:true means sub key still missing – retry fresh=1)',
         },
         {
           method: 'GET',
@@ -482,7 +482,11 @@ app.get('/api/kkey', async (req, res) => {
       inflightMints.set(ck, p);
     }
     const data = await p;
-    keyCache.set(ck, data);
+    // Complete mints get the full TTL; partials (stream-only) get 10s so a
+    // follow-up retry can mint the missing sub key instead of re-serving it.
+    const complete = !!(data.streamKey && data.subKey);
+    if (!complete) data.partial = true;
+    keyCache.set(ck, data, complete ? undefined : 10);
     res.set('X-Cache', 'MISS');
     res.json({
       success: true,
@@ -586,6 +590,13 @@ if (require.main === module) {
     console.log(`     Source: ${getBase()}`);
     console.log(`     Cache : ${cacheEnabled ? `enabled (TTL ${cacheTtl}s)` : 'disabled'}`);
     console.log(`     Try   : curl http://localhost:${PORT}${config.endpoints[0]?.path || '/products'}\n`);
+    // warm the headless browser in the background so the first mint is fast
+    setImmediate(() => {
+      try {
+        const { warmBrowser } = require('./scraper');
+        warmBrowser().then((ok) => ok && console.log('     Browser: warmed ✓'));
+      } catch {}
+    });
   });
   const shutdown = () => {
     server.close(() => {
