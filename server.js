@@ -344,55 +344,81 @@ app.delete('/cache', (req, res) => {
   res.json({ success: true, message: 'Cache cleared' });
 });
 
-// ── kkey minter (needs Playwright + Chromium; NOT cached – keys live seconds)
-// GET /api/kkey?dramaId=8409&epsId=144044
+// ── kkey minter (needs Playwright + Chromium; short-TTL cache – keys live seconds)
+// GET /api/kkey?dramaId=8409&epsId=144044[&fresh=1]
 // visits the episode page headlessly and sniffs the stream/sub kkeys.
 // Frontend play-time flow: /api/kkey → immediately /api/episode?kkey= + /api/sub?kkey=
+// Cache: KKEY_CACHE_TTL seconds (default 45). Concurrent mints for the same
+// episode share one in-flight browser run. Pass fresh=1 to bypass the cache
+// (e.g. upstream rejected a cached key with 403).
+const KKEY_CACHE_TTL = Number(process.env.KKEY_CACHE_TTL) || 45;
+const keyCache = new NodeCache({ stdTTL: KKEY_CACHE_TTL, checkperiod: 30, useClones: false });
+const inflightMints = new Map();
+
 app.get('/api/kkey', async (req, res) => {
   const start = Date.now();
   const dramaId = req.query?.dramaId || req.query?.id || '';
   const epsId = req.query?.epsId || req.query?.ep || '';
   if (!dramaId) return res.status(400).json({ success: false, error: 'Missing required query param: dramaId' });
   if (!epsId) return res.status(400).json({ success: false, error: 'Missing required query param: epsId' });
+  const ck = `kkey:${dramaId}:${epsId}`;
+  const fresh = req.query?.fresh === '1' || req.query?.fresh === 'true';
+  if (!fresh) {
+    const hit = keyCache.get(ck);
+    if (hit) {
+      res.set('X-Cache', 'HIT');
+      return res.json({ success: true, cached: true, source: hit.pageUrl, data: hit, tookMs: Date.now() - start });
+    }
+  }
   try {
     const { mintKkeys, episodePageUrl } = require('./scraper');
-    const detailUrl = `${getBase()}/api/DramaList/Drama/${encodeURIComponent(String(dramaId))}?isq=false`;
-    const detail = await fetchJson(detailUrl, {
-      headers: { Referer: `${getBase()}/`, Origin: getBase() },
-    });
-    const episodes = detail?.episodes || detail?.data?.episodes || [];
-    const ep = episodes.find((e) => String(e.id) === String(epsId));
-    if (!ep) {
-      return res.status(404).json({
-        success: false,
-        error: `Episode ${epsId} not found in drama ${dramaId} (see GET /api/drama?id=${dramaId})`,
-      });
+    let p = inflightMints.get(ck);
+    if (!p) {
+      p = (async () => {
+        const detailUrl = `${getBase()}/api/DramaList/Drama/${encodeURIComponent(String(dramaId))}?isq=false`;
+        const detail = await fetchJson(detailUrl, {
+          headers: { Referer: `${getBase()}/`, Origin: getBase() },
+        });
+        const episodes = detail?.episodes || detail?.data?.episodes || [];
+        const ep = episodes.find((e) => String(e.id) === String(epsId));
+        if (!ep) {
+          const e = new Error(`Episode ${epsId} not found in drama ${dramaId} (see GET /api/drama?id=${dramaId})`);
+          e.status = 404;
+          throw e;
+        }
+        const pageUrl = episodePageUrl(getBase(), {
+          title: detail?.title || detail?.data?.title,
+          dramaId,
+          epsNum: ep.number ?? ep.episode ?? 1,
+          epsId,
+        });
+        const keys = await mintKkeys({ pageUrl, timeoutMs: Number(req.query.timeoutMs) || 30000 });
+        if (!keys.streamKey && !keys.subKey) {
+          const e = new Error('No kkeys observed on episode page (site may be challenging headless browsers)');
+          e.status = 502;
+          e.source = pageUrl;
+          throw e;
+        }
+        return { dramaId: String(dramaId), epsId: String(epsId), epsNum: ep.number ?? null, ...keys };
+      })().finally(() => inflightMints.delete(ck));
+      inflightMints.set(ck, p);
     }
-    const pageUrl = episodePageUrl(getBase(), {
-      title: detail?.title || detail?.data?.title,
-      dramaId,
-      epsNum: ep.number ?? ep.episode ?? 1,
-      epsId,
-    });
-    const keys = await mintKkeys({ pageUrl, timeoutMs: Number(req.query.timeoutMs) || 30000 });
-    if (!keys.streamKey && !keys.subKey) {
-      return res.status(502).json({
-        success: false,
-        error: 'No kkeys observed on episode page (site may be challenging headless browsers)',
-        source: pageUrl,
-      });
-    }
+    const data = await p;
+    keyCache.set(ck, data);
+    res.set('X-Cache', 'MISS');
     res.json({
       success: true,
       cached: false,
-      source: pageUrl,
-      data: { dramaId: String(dramaId), epsId: String(epsId), epsNum: ep.number ?? null, ...keys },
+      source: data.pageUrl,
+      data,
       tookMs: Date.now() - start,
     });
   } catch (e) {
     console.error('[GET /api/kkey] failed:', e.message);
     const status = e.status && e.status < 600 ? e.status : 502;
-    res.status(status).json({ success: false, error: status === 503 ? e.message : 'kkey mint failed', details: e.message });
+    const out = { success: false, error: status === 503 ? e.message : status === 404 ? e.message : 'kkey mint failed', details: e.message };
+    if (e.source) out.source = e.source;
+    res.status(status).json(out);
   }
 });
 

@@ -72,6 +72,12 @@ async function fetchStatic(url, headers = {}) {
 
 // ── Reused browser (avoids launching Chromium per request) ─────────────
 let _browserPromise = null;
+// One shared context: pages are cheap, contexts carry warm state (cookies,
+// storage, JIT) that speeds up repeat mints. Never closed per-request.
+let _sharedContextPromise = null;
+
+const BROWSER_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 async function getBrowser(playwright) {
   if (!_browserPromise) {
@@ -104,8 +110,31 @@ async function closeBrowser() {
   if (_browserPromise) {
     const b = await _browserPromise.catch(() => null);
     _browserPromise = null;
+    _sharedContextPromise = null;
     if (b) await b.close().catch(() => {});
   }
+}
+
+// Drop cached browser/context when the engine dies so the next call relaunches.
+function resetBrowserState() {
+  _browserPromise = null;
+  _sharedContextPromise = null;
+}
+
+function isBrowserDeadError(e) {
+  return /closed|crashed|destroyed|disconnected|target crashed/i.test(e?.message || '');
+}
+
+async function getSharedContext(playwright) {
+  const browser = await getBrowser(playwright);
+  if (!_sharedContextPromise) {
+    _sharedContextPromise = browser.newContext({ userAgent: BROWSER_UA }).catch((e) => {
+      _sharedContextPromise = null;
+      if (isBrowserDeadError(e)) resetBrowserState();
+      throw e;
+    });
+  }
+  return { browser, context: await _sharedContextPromise };
 }
 
 process.once('exit', () => {
@@ -129,8 +158,7 @@ async function fetchRendered(url, opts = {}) {
   const browser = await getBrowser(playwright);
   const context = await browser.newContext({
     userAgent:
-      opts.userAgent ||
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      opts.userAgent || BROWSER_UA,
   });
   try {
     const page = await context.newPage();
@@ -229,39 +257,38 @@ async function mintKkeys({ pageUrl, timeoutMs = 30000 }) {
     err.status = 503;
     throw err;
   }
-  const browser = await getBrowser(playwright);
-  const context = await browser.newContext({
-    userAgent:
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  });
+  const { context } = await getSharedContext(playwright);
   const found = {};
+  const page = await context.newPage().catch((e) => {
+    if (isBrowserDeadError(e)) resetBrowserState();
+    throw e;
+  });
   try {
-    const page = await context.newPage();
-    try {
-      page.on('request', (req) => {
-        let u;
-        try {
-          u = new URL(req.url());
-        } catch {
-          return;
-        }
-        const kkey = u.searchParams.get('kkey');
-        if (!kkey) return;
-        if (u.pathname.includes('/api/DramaList/Episode/') && !found.streamKey) found.streamKey = kkey;
-        if (u.pathname.includes('/api/Sub/') && !found.subKey) found.subKey = kkey;
-      });
-      await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: timeoutMs }).catch(() => {});
-      // wait until both keys seen (or timeout) – page JS fires the API calls on load
-      const deadline = Date.now() + timeoutMs;
-      while ((!found.streamKey || !found.subKey) && Date.now() < deadline) {
-        await page.waitForTimeout(500).catch(() => new Promise((r) => setTimeout(r, 500)));
+    page.on('request', (req) => {
+      let u;
+      try {
+        u = new URL(req.url());
+      } catch {
+        return;
       }
-      return { streamKey: found.streamKey || null, subKey: found.subKey || null, pageUrl };
-    } finally {
-      await page.close().catch(() => {});
+      const kkey = u.searchParams.get('kkey');
+      if (!kkey) return;
+      if (u.pathname.includes('/api/DramaList/Episode/') && !found.streamKey) found.streamKey = kkey;
+      if (u.pathname.includes('/api/Sub/') && !found.subKey) found.subKey = kkey;
+    });
+    await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: timeoutMs }).catch(() => {});
+    // wait until both keys seen (or timeout) – page JS fires the API calls on load
+    const deadline = Date.now() + timeoutMs;
+    while ((!found.streamKey || !found.subKey) && Date.now() < deadline) {
+      await page.waitForTimeout(500).catch(() => new Promise((r) => setTimeout(r, 500)));
     }
+    return { streamKey: found.streamKey || null, subKey: found.subKey || null, pageUrl };
+  } catch (e) {
+    if (isBrowserDeadError(e)) resetBrowserState();
+    throw e;
   } finally {
-    await context.close().catch(() => {});
+    // page only – the shared context stays warm for the next mint
+    await page.close().catch(() => {});
   }
 }
 
