@@ -3,10 +3,20 @@ services:
     name: kdramascraperapi
     runtime: node
     plan: free
-    buildCommand: npm install && npx playwright install chromium-headless-shell
+    buildCommand: npm install && PLAYWRIGHT_BROWSERS_PATH=./.playwright-browsers npx playwright install chromium-headless-shell
+    # Browsers live in ./.playwright-browsers (project dir) so the build and
+    # runtime see the same path. PLAYWRIGHT_BROWSERS_PATH env below must match.
     # Headless shell needs no root/apt (unlike --with-deps, which Render blocks).
     # Lean alternative (no /api/kkey minting): npm install --omit=optional
     startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: SOURCE_URL
+        value: https://kisskh.do
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: ./.playwright-browsers
     healthCheckPath: /health
     envVars:
       - key: NODE_VERSION

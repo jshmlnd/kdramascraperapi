@@ -1,6 +1,7 @@
 node_modules/
 .env
 .cache/
+.playwright-browsers/
 *.log
 .DS_Store
 playwright/.cache/
