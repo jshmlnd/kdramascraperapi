@@ -387,7 +387,7 @@ app.get('/', (_req, res) => {
           method: 'GET',
           path: '/api/segment',
           kind: 'api',
-          description: 'Proxy segment/key bytes with CORS + Referer – GET /api/segment?src=<ts|key>',
+          description: 'Proxy segment/key/subtitle bytes with CORS + Referer – GET /api/segment?src=<ts|key|srt>',
         },
       ]),
     cache: cacheEnabled ? { enabled: true, ttl: cacheTtl, keys: cache.keys().length } : { enabled: false },
@@ -540,7 +540,7 @@ app.get('/api/stream', async (req, res) => {
 
 app.get('/api/segment', (req, res) => {
   const src = req.query?.src || req.query?.url || '';
-  const bad = checkMediaSrc(src, ['.ts', '.m4s', '.mp4', '.aac', '.key', '.vtt', '.mpd']);
+  const bad = checkMediaSrc(src, ['.ts', '.m4s', '.mp4', '.aac', '.key', '.vtt', '.srt', '.mpd']);
   if (bad) return res.status(400).json({ success: false, error: bad });
   const headers = { Referer: `${getBase()}/`, Origin: getBase() };
   if (req.headers.range) headers.Range = req.headers.range;
