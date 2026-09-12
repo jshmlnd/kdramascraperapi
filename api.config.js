@@ -97,6 +97,7 @@ module.exports = {
       method: 'GET',
       path: '/api/episode',
       kind: 'api',
+      resolveEpisode: true,
       cache: { ttl: 60 },
       buildUrl: (baseUrl, req) => {
         const epsId = req.query?.epsId || req.query?.ep || '';
@@ -111,12 +112,13 @@ module.exports = {
         p.set('kkey', String(kkey));
         return `${baseUrl}/api/DramaList/Episode/${encodeURIComponent(String(epsId))}.png?${p.toString()}`;
       },
-      description: 'Episode stream URLs {Video, ThirdParty m3u8} (JSON) – GET /api/episode?epsId=144044&kkey=...',
+      description: 'Episode stream URLs {Video, ThirdParty m3u8} – GET /api/episode?epsId=144044&kkey=... or ?dramaId=8409&ep=1&kkey=...',
     },
     {
       method: 'GET',
       path: '/api/sub',
       kind: 'api',
+      resolveEpisode: true,
       cache: { ttl: 60 },
       buildUrl: (baseUrl, req) => {
         const epsId = req.query?.epsId || req.query?.ep || '';
@@ -130,7 +132,7 @@ module.exports = {
         const p = new URLSearchParams({ kkey: String(kkey) });
         return `${baseUrl}/api/Sub/${encodeURIComponent(String(epsId))}?${p.toString()}`;
       },
-      description: 'Episode subtitles, English-only by default [{src,label}] – GET /api/sub?epsId=144044&kkey=...[&lang=id|all]',
+      description: 'Episode subtitles, English-only by default [{src,label}] – GET /api/sub?epsId=144044&kkey=... or ?dramaId=8409&ep=1&kkey=...[&lang=id|all]',
       map: (raw, req) => {
         const { filterSubtitles } = require('./scraper');
         return filterSubtitles(raw, req.query?.lang || req.body?.lang || 'en');

@@ -203,6 +203,37 @@ function validateConfig() {
   }
 }
 
+// Resolve UI-style "dramaId + ep number" → KissKH episode object id.
+// Endpoints with resolveEpisode:true accept EITHER:
+//   ?epsId=144044            (episode object id, preferred)
+//   ?dramaId=8409&ep=1       (drama id + episode number, as shown in UI)
+// A lone ?ep= without dramaId keeps legacy meaning (episode object id).
+async function ensureEpsId(req) {
+  const q = req.query || {};
+  if (q.epsId) return;
+  const dramaId = q.dramaId || q.id || '';
+  if (!dramaId && q.ep != null && q.ep !== '') return; // legacy: lone ?ep= means episode id
+  const hasDrama = dramaId !== '' && dramaId != null;
+  const numRaw = q.epNum ?? q.number ?? (hasDrama ? q.ep : undefined);
+  if (!hasDrama || numRaw == null || numRaw === '') {
+    const e = new Error('Provide epsId (episode id), or dramaId + ep (episode number as shown in UI)');
+    e.status = 400;
+    throw e;
+  }
+  const detailUrl = `${getBase()}/api/DramaList/Drama/${encodeURIComponent(String(dramaId))}?isq=false`;
+  const detail = await fetchJson(detailUrl, {
+    headers: { Referer: `${getBase()}/`, Origin: getBase() },
+  });
+  const episodes = detail?.episodes || detail?.data?.episodes || [];
+  const ep = episodes.find((e) => String(e.number ?? e.episode) === String(numRaw));
+  if (!ep || ep.id == null) {
+    const e = new Error(`Episode number ${numRaw} not found in drama ${dramaId} (see GET /api/drama?id=${dramaId})`);
+    e.status = 404;
+    throw e;
+  }
+  req.query.epsId = String(ep.id);
+}
+
 // ── Auto-register endpoints from config ──────────────────────────────
 function registerEndpoints() {
   for (const ep of config.endpoints) {
@@ -214,6 +245,14 @@ function registerEndpoints() {
 
     app[method](ep.path, async (req, res) => {
       const start = Date.now();
+      if (ep.resolveEpisode) {
+        try {
+          await ensureEpsId(req);
+        } catch (e) {
+          const status = e.status && e.status < 600 ? e.status : 502;
+          return res.status(status).json({ success: false, error: e.message });
+        }
+      }
       let targetUrl;
       try {
         targetUrl = resolveUrl(ep, req);
@@ -336,7 +375,7 @@ app.get('/', (_req, res) => {
           method: 'GET',
           path: '/api/kkey',
           kind: 'api',
-          description: 'Mint stream/sub kkeys – GET /api/kkey?dramaId=8409&epsId=144044 (needs Playwright)',
+          description: 'Mint stream/sub kkeys – GET /api/kkey?dramaId=8409&epsId=144044 or ?dramaId=8409&ep=1 (needs Playwright)',
         },
         {
           method: 'GET',
@@ -376,7 +415,7 @@ app.delete('/cache', (req, res) => {
 });
 
 // ── kkey minter (needs Playwright + Chromium; short-TTL cache – keys live seconds)
-// GET /api/kkey?dramaId=8409&epsId=144044[&fresh=1]
+// GET /api/kkey?dramaId=8409&epsId=144044  or  ?dramaId=8409&ep=1[&fresh=1]
 // visits the episode page headlessly and sniffs the stream/sub kkeys.
 // Frontend play-time flow: /api/kkey → immediately /api/episode?kkey= + /api/sub?kkey=
 // Cache: KKEY_CACHE_TTL seconds (default 45). Concurrent mints for the same
@@ -389,10 +428,14 @@ const inflightMints = new Map();
 app.get('/api/kkey', async (req, res) => {
   const start = Date.now();
   const dramaId = req.query?.dramaId || req.query?.id || '';
-  const epsId = req.query?.epsId || req.query?.ep || '';
+  const epsIdParam = req.query?.epsId || '';
+  // ep number accepted when dramaId given (?dramaId=8409&ep=1); lone ?ep= keeps legacy id meaning
+  const epNumParam = !epsIdParam ? (req.query?.epNum ?? req.query?.number ?? (dramaId ? req.query?.ep : undefined)) : undefined;
   if (!dramaId) return res.status(400).json({ success: false, error: 'Missing required query param: dramaId' });
-  if (!epsId) return res.status(400).json({ success: false, error: 'Missing required query param: epsId' });
-  const ck = `kkey:${dramaId}:${epsId}`;
+  if (!epsIdParam && (epNumParam == null || epNumParam === '')) {
+    return res.status(400).json({ success: false, error: 'Missing required query param: epsId (or ep episode number)' });
+  }
+  const ck = `kkey:${dramaId}:${epsIdParam || `n${epNumParam}`}`;
   const fresh = req.query?.fresh === '1' || req.query?.fresh === 'true';
   if (!fresh) {
     const hit = keyCache.get(ck);
@@ -411,12 +454,16 @@ app.get('/api/kkey', async (req, res) => {
           headers: { Referer: `${getBase()}/`, Origin: getBase() },
         });
         const episodes = detail?.episodes || detail?.data?.episodes || [];
-        const ep = episodes.find((e) => String(e.id) === String(epsId));
-        if (!ep) {
-          const e = new Error(`Episode ${epsId} not found in drama ${dramaId} (see GET /api/drama?id=${dramaId})`);
+        const ep = epsIdParam
+          ? episodes.find((e) => String(e.id) === String(epsIdParam))
+          : episodes.find((e) => String(e.number ?? e.episode) === String(epNumParam));
+        if (!ep || ep.id == null) {
+          const what = epsIdParam ? `Episode ${epsIdParam}` : `Episode number ${epNumParam}`;
+          const e = new Error(`${what} not found in drama ${dramaId} (see GET /api/drama?id=${dramaId})`);
           e.status = 404;
           throw e;
         }
+        const epsId = String(ep.id);
         const pageUrl = episodePageUrl(getBase(), {
           title: detail?.title || detail?.data?.title,
           dramaId,

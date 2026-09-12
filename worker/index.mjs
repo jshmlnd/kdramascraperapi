@@ -102,6 +102,29 @@ function countOf(data) {
   return Array.isArray(data) ? data.length : data ? 1 : 0;
 }
 
+// Resolve UI-style "dramaId + ep number" → KissKH episode object id.
+// ?epsId=144044 preferred; ?dramaId=8409&ep=1 (or epNum/number) resolves via
+// the drama detail call. Lone ?ep= without dramaId keeps legacy id meaning.
+async function resolveEpsId(base, u, env) {
+  const direct = u.searchParams.get('epsId') || '';
+  if (direct) return direct;
+  const dramaId = u.searchParams.get('dramaId') || u.searchParams.get('id') || '';
+  const epAlias = u.searchParams.get('ep');
+  if (!dramaId && epAlias) return epAlias; // legacy: lone ?ep= means episode id
+  const hasDrama = dramaId !== '';
+  const numRaw = u.searchParams.get('epNum') ?? u.searchParams.get('number') ?? (hasDrama ? u.searchParams.get('ep') : null);
+  if (!hasDrama || numRaw == null || numRaw === '') {
+    throw Object.assign(new Error('Provide epsId (episode id), or dramaId + ep (episode number as shown in UI)'), { status: 400 });
+  }
+  const detail = await upstream(`${base}/api/DramaList/Drama/${encodeURIComponent(dramaId)}?isq=false`, env);
+  const episodes = detail?.episodes || detail?.data?.episodes || [];
+  const ep = episodes.find((e) => String(e.number ?? e.episode) === String(numRaw));
+  if (!ep || ep.id == null) {
+    throw Object.assign(new Error(`Episode number ${numRaw} not found in drama ${dramaId} (see GET /api/drama?id=${dramaId})`), { status: 404 });
+  }
+  return String(ep.id);
+}
+
 // Keep in sync with filterSubtitles() in scraper.js (worker has no deps).
 const SUB_LANG_ALIASES = {
   en: ['en', 'eng', 'english'],
@@ -189,10 +212,9 @@ const ROUTES = [
   {
     path: '/api/episode',
     ttl: TTL.episode,
-    desc: 'Stream URLs {Video, ThirdParty} – GET /api/episode?epsId=144044&kkey=...',
-    build: (base, u, env) => {
-      const epsId = u.searchParams.get('epsId') || u.searchParams.get('ep') || '';
-      if (!epsId) throw Object.assign(new Error('Missing required query param: epsId'), { status: 400 });
+    desc: 'Stream URLs {Video, ThirdParty} – GET /api/episode?epsId=144044&kkey=... or ?dramaId=8409&ep=1&kkey=...',
+    build: async (base, u, env) => {
+      const epsId = await resolveEpsId(base, u, env);
       const kkey = u.searchParams.get('kkey') || env.KISSKH_STREAM_KEY || '';
       if (!kkey) {
         throw Object.assign(
@@ -208,11 +230,10 @@ const ROUTES = [
   {
     path: '/api/sub',
     ttl: TTL.sub,
-    desc: 'Subtitles, English-only by default – GET /api/sub?epsId=144044&kkey=...[&lang=id|all]',
+    desc: 'Subtitles, English-only by default – GET /api/sub?epsId=144044&kkey=... or ?dramaId=8409&ep=1&kkey=...[&lang=id|all]',
     map: (raw, reqUrl) => filterSubtitles(raw, reqUrl.searchParams.get('lang') || 'en'),
-    build: (base, u, env) => {
-      const epsId = u.searchParams.get('epsId') || u.searchParams.get('ep') || '';
-      if (!epsId) throw Object.assign(new Error('Missing required query param: epsId'), { status: 400 });
+    build: async (base, u, env) => {
+      const epsId = await resolveEpsId(base, u, env);
       const kkey = u.searchParams.get('kkey') || env.KISSKH_SUB_KEY || '';
       if (!kkey) {
         throw Object.assign(
@@ -270,7 +291,7 @@ export default {
     const start = Date.now();
     let target;
     try {
-      target = route.build(getBase(env), u, env);
+      target = await route.build(getBase(env), u, env);
       if (!isAllowed(target, env)) throw new Error('Resolved URL is not allowed');
     } catch (e) {
       return err(e.message, e.status || 400, env);
