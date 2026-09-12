@@ -75,7 +75,24 @@ let _browserPromise = null;
 
 async function getBrowser(playwright) {
   if (!_browserPromise) {
-    _browserPromise = playwright.chromium.launch({ headless: true }).catch((e) => {
+    _browserPromise = (async () => {
+      const baseOpts = { headless: true };
+      // Render-safe: chromium-headless-shell needs no apt deps and no root.
+      // Install with: npx playwright install chromium-headless-shell
+      // Override with PLAYWRIGHT_CHANNEL=chromium (full build) if available.
+      const channels = process.env.PLAYWRIGHT_CHANNEL
+        ? [process.env.PLAYWRIGHT_CHANNEL]
+        : ['chromium-headless-shell', undefined];
+      let lastErr;
+      for (const channel of channels) {
+        try {
+          return await playwright.chromium.launch(channel ? { ...baseOpts, channel } : baseOpts);
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+      throw lastErr;
+    })().catch((e) => {
       _browserPromise = null;
       throw e;
     });
