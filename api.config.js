@@ -102,8 +102,13 @@ module.exports = {
         const epsId = req.query?.epsId || req.query?.ep || '';
         if (!epsId) throw new Error('Missing required query param: epsId');
         const kkey = req.query?.kkey || process.env.KISSKH_STREAM_KEY || '';
+        if (!kkey) {
+          const e = new Error('kkey required: mint one via GET /api/kkey?dramaId=&epsId= then retry as /api/episode?epsId=&kkey=');
+          e.status = 400;
+          throw e;
+        }
         const p = new URLSearchParams({ err: 'false', ts: '', time: '' });
-        if (kkey) p.set('kkey', String(kkey));
+        p.set('kkey', String(kkey));
         return `${baseUrl}/api/DramaList/Episode/${encodeURIComponent(String(epsId))}.png?${p.toString()}`;
       },
       description: 'Episode stream URLs {Video, ThirdParty m3u8} (JSON) – GET /api/episode?epsId=144044&kkey=...',
@@ -117,10 +122,13 @@ module.exports = {
         const epsId = req.query?.epsId || req.query?.ep || '';
         if (!epsId) throw new Error('Missing required query param: epsId');
         const kkey = req.query?.kkey || process.env.KISSKH_SUB_KEY || '';
-        const p = new URLSearchParams();
-        if (kkey) p.set('kkey', String(kkey));
-        const qs = p.toString();
-        return `${baseUrl}/api/Sub/${encodeURIComponent(String(epsId))}${qs ? `?${qs}` : ''}`;
+        if (!kkey) {
+          const e = new Error('kkey required: mint one via GET /api/kkey?dramaId=&epsId= then retry as /api/sub?epsId=&kkey=');
+          e.status = 400;
+          throw e;
+        }
+        const p = new URLSearchParams({ kkey: String(kkey) });
+        return `${baseUrl}/api/Sub/${encodeURIComponent(String(epsId))}?${p.toString()}`;
       },
       description: 'Episode subtitles [{src,label}] (JSON) – GET /api/sub?epsId=144044&kkey=...',
     },

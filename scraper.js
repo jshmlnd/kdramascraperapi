@@ -135,6 +135,74 @@ async function fetchHtml(url, opts = {}) {
   return fetchStatic(url, opts.headers);
 }
 
+// ── kkey minting (KissKH stream/sub auth) ──────────────────────────────
+// Visits the episode page in headless Chromium and sniffs the short-lived
+// `kkey` tokens the page itself requests for /api/DramaList/Episode/*.png
+// (stream) and /api/Sub/* (subtitles). Requires playwright + chromium.
+// kkeys expire in seconds – call /api/episode and /api/sub immediately after.
+function slugify(title) {
+  return String(title || 'drama')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || 'drama';
+}
+
+function episodePageUrl(base, { title, dramaId, epsNum, epsId }) {
+  const slug = slugify(title);
+  return `${base}/Drama/${slug}/Episode-${epsNum}?id=${encodeURIComponent(String(dramaId))}&ep=${encodeURIComponent(String(epsId))}&page=0&pageSize=100`;
+}
+
+async function mintKkeys({ pageUrl, timeoutMs = 30000 }) {
+  if (!isSafeUrl(pageUrl)) {
+    const err = new Error(`Blocked unsafe URL: ${pageUrl}`);
+    err.status = 400;
+    throw err;
+  }
+  let playwright;
+  try {
+    playwright = require('playwright');
+  } catch {
+    const err = new Error('Playwright not installed. Run: npm i playwright && npx playwright install chromium');
+    err.status = 503;
+    throw err;
+  }
+  const browser = await getBrowser(playwright);
+  const context = await browser.newContext({
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  });
+  const found = {};
+  try {
+    const page = await context.newPage();
+    try {
+      page.on('request', (req) => {
+        let u;
+        try {
+          u = new URL(req.url());
+        } catch {
+          return;
+        }
+        const kkey = u.searchParams.get('kkey');
+        if (!kkey) return;
+        if (u.pathname.includes('/api/DramaList/Episode/') && !found.streamKey) found.streamKey = kkey;
+        if (u.pathname.includes('/api/Sub/') && !found.subKey) found.subKey = kkey;
+      });
+      await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: timeoutMs }).catch(() => {});
+      // wait until both keys seen (or timeout) – page JS fires the API calls on load
+      const deadline = Date.now() + timeoutMs;
+      while ((!found.streamKey || !found.subKey) && Date.now() < deadline) {
+        await page.waitForTimeout(500).catch(() => new Promise((r) => setTimeout(r, 500)));
+      }
+      return { streamKey: found.streamKey || null, subKey: found.subKey || null, pageUrl };
+    } finally {
+      await page.close().catch(() => {});
+    }
+  } finally {
+    await context.close().catch(() => {});
+  }
+}
+
 function extractField($, $root, def) {
   if (typeof def === 'function') return def($root, $);
   if (def && typeof def === 'object' && !Array.isArray(def)) {
@@ -206,4 +274,4 @@ async function scrape(opts) {
   return results;
 }
 
-module.exports = { http, fetchStatic, fetchRendered, fetchHtml, scrape, extractField, isSafeUrl, closeBrowser };
+module.exports = { http, fetchStatic, fetchRendered, fetchHtml, scrape, extractField, isSafeUrl, closeBrowser, mintKkeys, slugify, episodePageUrl };

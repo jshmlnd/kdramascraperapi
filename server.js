@@ -292,13 +292,22 @@ app.get('/', (_req, res) => {
   res.json({
     name: config.name,
     sourceUrl: getBase(),
-    endpoints: config.endpoints.map((e) => ({
-      method: e.method,
-      path: e.path,
-      kind: e.kind === 'api' || e.api === true ? 'api' : 'scrape',
-      selector: e.selector,
-      description: e.description || '',
-    })),
+    endpoints: config.endpoints
+      .map((e) => ({
+        method: e.method,
+        path: e.path,
+        kind: e.kind === 'api' || e.api === true ? 'api' : 'scrape',
+        selector: e.selector,
+        description: e.description || '',
+      }))
+      .concat([
+        {
+          method: 'GET',
+          path: '/api/kkey',
+          kind: 'api',
+          description: 'Mint stream/sub kkeys – GET /api/kkey?dramaId=8409&epsId=144044 (needs Playwright)',
+        },
+      ]),
     cache: cacheEnabled ? { enabled: true, ttl: cacheTtl, keys: cache.keys().length } : { enabled: false },
     docs: 'Edit api.config.js to customize GET/POST endpoints. Restart server after changes.',
   });
@@ -323,6 +332,58 @@ app.delete('/cache', (req, res) => {
   res.json({ success: true, message: 'Cache cleared' });
 });
 
+// ── kkey minter (needs Playwright + Chromium; NOT cached – keys live seconds)
+// GET /api/kkey?dramaId=8409&epsId=144044
+// visits the episode page headlessly and sniffs the stream/sub kkeys.
+// Frontend play-time flow: /api/kkey → immediately /api/episode?kkey= + /api/sub?kkey=
+app.get('/api/kkey', async (req, res) => {
+  const start = Date.now();
+  const dramaId = req.query?.dramaId || req.query?.id || '';
+  const epsId = req.query?.epsId || req.query?.ep || '';
+  if (!dramaId) return res.status(400).json({ success: false, error: 'Missing required query param: dramaId' });
+  if (!epsId) return res.status(400).json({ success: false, error: 'Missing required query param: epsId' });
+  try {
+    const { mintKkeys, episodePageUrl } = require('./scraper');
+    const detailUrl = `${getBase()}/api/DramaList/Drama/${encodeURIComponent(String(dramaId))}?isq=false`;
+    const detail = await fetchJson(detailUrl, {
+      headers: { Referer: `${getBase()}/`, Origin: getBase() },
+    });
+    const episodes = detail?.episodes || detail?.data?.episodes || [];
+    const ep = episodes.find((e) => String(e.id) === String(epsId));
+    if (!ep) {
+      return res.status(404).json({
+        success: false,
+        error: `Episode ${epsId} not found in drama ${dramaId} (see GET /api/drama?id=${dramaId})`,
+      });
+    }
+    const pageUrl = episodePageUrl(getBase(), {
+      title: detail?.title || detail?.data?.title,
+      dramaId,
+      epsNum: ep.number ?? ep.episode ?? 1,
+      epsId,
+    });
+    const keys = await mintKkeys({ pageUrl, timeoutMs: Number(req.query.timeoutMs) || 30000 });
+    if (!keys.streamKey && !keys.subKey) {
+      return res.status(502).json({
+        success: false,
+        error: 'No kkeys observed on episode page (site may be challenging headless browsers)',
+        source: pageUrl,
+      });
+    }
+    res.json({
+      success: true,
+      cached: false,
+      source: pageUrl,
+      data: { dramaId: String(dramaId), epsId: String(epsId), epsNum: ep.number ?? null, ...keys },
+      tookMs: Date.now() - start,
+    });
+  } catch (e) {
+    console.error('[GET /api/kkey] failed:', e.message);
+    const status = e.status && e.status < 600 ? e.status : 502;
+    res.status(status).json({ success: false, error: status === 503 ? e.message : 'kkey mint failed', details: e.message });
+  }
+});
+
 // ── Boot ─────────────────────────────────────────────────────────────
 validateConfig();
 registerEndpoints();
@@ -332,7 +393,9 @@ app.use((req, res) => {
   res.status(404).json({
     success: false,
     error: 'Not found',
-    available: config.endpoints.map((e) => `${e.method} ${e.path}`).concat(['GET /', 'GET /health']),
+    available: config.endpoints
+      .map((e) => `${e.method} ${e.path}`)
+      .concat(['GET /api/kkey', 'GET /', 'GET /health']),
   });
 });
 

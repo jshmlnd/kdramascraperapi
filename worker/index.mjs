@@ -155,8 +155,14 @@ const ROUTES = [
       const epsId = u.searchParams.get('epsId') || u.searchParams.get('ep') || '';
       if (!epsId) throw Object.assign(new Error('Missing required query param: epsId'), { status: 400 });
       const kkey = u.searchParams.get('kkey') || env.KISSKH_STREAM_KEY || '';
+      if (!kkey) {
+        throw Object.assign(
+          new Error('kkey required: mint one via GET /api/kkey?dramaId=&epsId= (Express/Render server) then retry as /api/episode?epsId=&kkey='),
+          { status: 400 }
+        );
+      }
       const p = new URLSearchParams({ err: 'false', ts: '', time: '' });
-      if (kkey) p.set('kkey', kkey);
+      p.set('kkey', kkey);
       return `${base}/api/DramaList/Episode/${encodeURIComponent(epsId)}.png?${p.toString()}`;
     },
   },
@@ -168,7 +174,13 @@ const ROUTES = [
       const epsId = u.searchParams.get('epsId') || u.searchParams.get('ep') || '';
       if (!epsId) throw Object.assign(new Error('Missing required query param: epsId'), { status: 400 });
       const kkey = u.searchParams.get('kkey') || env.KISSKH_SUB_KEY || '';
-      const qs = kkey ? `?kkey=${encodeURIComponent(kkey)}` : '';
+      if (!kkey) {
+        throw Object.assign(
+          new Error('kkey required: mint one via GET /api/kkey?dramaId=&epsId= (Express/Render server) then retry as /api/sub?epsId=&kkey='),
+          { status: 400 }
+        );
+      }
+      const qs = `?kkey=${encodeURIComponent(kkey)}`;
       return `${base}/api/Sub/${encodeURIComponent(epsId)}${qs}`;
     },
   },

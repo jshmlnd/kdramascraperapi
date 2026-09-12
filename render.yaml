@@ -4,6 +4,9 @@ services:
     runtime: node
     plan: free
     buildCommand: npm install --omit=optional
+    # To enable GET /api/kkey (Playwright minting), switch build to Docker
+    # (see Dockerfile) or use: npm install && npx playwright install chromium --with-deps
+    # Note: Chromium + deps is heavy (~1GB); only enable if you need server-side kkey minting.
     startCommand: npm start
     healthCheckPath: /health
     envVars:
