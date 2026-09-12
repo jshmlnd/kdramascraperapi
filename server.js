@@ -228,23 +228,41 @@ function registerEndpoints() {
 
       if (useCache) {
         const hit = cache.get(cacheKey);
-        if (hit) {
+        if (hit !== undefined) {
+          let data = hit;
+          let extra = {};
+          if (typeof ep.map === 'function') {
+            const m = ep.map(hit, req);
+            if (m && typeof m === 'object' && !Array.isArray(m) && 'data' in m) {
+              ({ data, ...extra } = m);
+            } else {
+              data = m;
+            }
+          }
           res.set('X-Cache', 'HIT');
-          return res.json({ success: true, cached: true, source: targetUrl, data: hit, tookMs: Date.now() - start });
+          return res.json({
+            success: true,
+            cached: true,
+            source: targetUrl,
+            count: Array.isArray(data) ? data.length : data ? 1 : 0,
+            data,
+            ...extra,
+            tookMs: Date.now() - start,
+          });
         }
       }
 
       try {
         const isApi = ep.kind === 'api' || ep.api === true;
-        let data;
+        let raw;
         if (isApi) {
           const opts = mergeFetchOpts(ep);
-          data = await fetchJson(targetUrl, {
+          raw = await fetchJson(targetUrl, {
             ...opts,
             headers: { Referer: `${getBase()}/`, Origin: getBase(), ...(opts.headers || {}) },
           });
         } else {
-          data = await scrape({
+          raw = await scrape({
             url: targetUrl,
             selector: ep.selector,
             fields: ep.fields || {},
@@ -254,12 +272,24 @@ function registerEndpoints() {
             limit: ep.limit,
           });
         }
-
+        // cache the RAW upstream payload so one fetch serves all map variants
         if (useCache) {
           const ttl = getTtlFor(ep);
-          if (ttl) cache.set(cacheKey, data, ttl);
-          else cache.set(cacheKey, data);
+          if (ttl) cache.set(cacheKey, raw, ttl);
+          else cache.set(cacheKey, raw);
           res.set('X-Cache', 'MISS');
+        }
+
+        // per-endpoint transform: fn(raw, req) → array | { data, ...extra }
+        let data = raw;
+        let extra = {};
+        if (typeof ep.map === 'function') {
+          const m = ep.map(raw, req);
+          if (m && typeof m === 'object' && !Array.isArray(m) && 'data' in m) {
+            ({ data, ...extra } = m);
+          } else {
+            data = m;
+          }
         }
 
         res.json({
@@ -268,6 +298,7 @@ function registerEndpoints() {
           source: targetUrl,
           count: Array.isArray(data) ? data.length : data ? 1 : 0,
           data,
+          ...extra,
           tookMs: Date.now() - start,
         });
       } catch (err) {

@@ -198,6 +198,52 @@ function episodePageUrl(base, { title, dramaId, epsNum, epsId }) {
   return `${base}/Drama/${slug}/Episode-${epsNum}?id=${encodeURIComponent(String(dramaId))}&ep=${encodeURIComponent(String(epsId))}&page=0&pageSize=100`;
 }
 
+// ── Subtitle language filter ───────────────────────────────────────────
+// /api/Sub/:epsId returns [{src, label}] in many languages. `lang` picks one:
+// 'en' (default), 'all' to disable, or any code/name ('id', 'indonesian').
+// Matched on whole tokens so 'en' never matches 'french'.
+const SUB_LANG_ALIASES = {
+  en: ['en', 'eng', 'english'],
+  id: ['id', 'ind', 'indonesian', 'bahasa'],
+  ms: ['ms', 'malay', 'melayu'],
+  ar: ['ar', 'arabic'],
+  hi: ['hi', 'hindi'],
+  es: ['es', 'spanish', 'espanol'],
+  pt: ['pt', 'portuguese'],
+  fr: ['fr', 'french'],
+  de: ['de', 'german'],
+  th: ['th', 'thai'],
+  vi: ['vi', 'vietnamese'],
+  zh: ['zh', 'chinese'],
+  ko: ['ko', 'korean'],
+  ja: ['ja', 'japanese'],
+};
+
+function subAcceptedTokens(lang) {
+  const want = String(lang || 'en').toLowerCase();
+  for (const [canonical, aliases] of Object.entries(SUB_LANG_ALIASES)) {
+    if (want === canonical || aliases.includes(want)) return aliases;
+  }
+  return [want];
+}
+
+function subMatchesLang(label, lang) {
+  const tokens = String(label || '')
+    .toLowerCase()
+    .split(/[^a-z]+/)
+    .filter(Boolean);
+  const accepted = subAcceptedTokens(lang);
+  return tokens.some((t) => accepted.includes(t));
+}
+
+function filterSubtitles(subs, lang = 'en') {
+  if (!Array.isArray(subs)) return subs;
+  if (String(lang).toLowerCase() === 'all') return subs;
+  const languages = [...new Set(subs.map((s) => s?.label).filter(Boolean))];
+  const data = subs.filter((s) => subMatchesLang(s?.label, lang));
+  return { data, languages, lang: String(lang).toLowerCase() };
+}
+
 // ── HLS playlist rewriting (stream proxy) ──────────────────────────────
 // Rewrites segment/key/init URIs in an .m3u8 to same-origin proxy URLs so
 // browsers avoid CDN CORS/hotlink blocks. Nested .m3u8 URIs point back at
@@ -363,4 +409,4 @@ async function scrape(opts) {
   return results;
 }
 
-module.exports = { http, fetchStatic, fetchRendered, fetchHtml, scrape, extractField, isSafeUrl, closeBrowser, mintKkeys, slugify, episodePageUrl, checkMediaSrc, rewritePlaylist, proxyPlaylistUrls };
+module.exports = { http, fetchStatic, fetchRendered, fetchHtml, scrape, extractField, isSafeUrl, closeBrowser, mintKkeys, slugify, episodePageUrl, checkMediaSrc, rewritePlaylist, proxyPlaylistUrls, filterSubtitles, subMatchesLang };

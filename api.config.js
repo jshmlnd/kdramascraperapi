@@ -130,7 +130,11 @@ module.exports = {
         const p = new URLSearchParams({ kkey: String(kkey) });
         return `${baseUrl}/api/Sub/${encodeURIComponent(String(epsId))}?${p.toString()}`;
       },
-      description: 'Episode subtitles [{src,label}] (JSON) – GET /api/sub?epsId=144044&kkey=...',
+      description: 'Episode subtitles, English-only by default [{src,label}] – GET /api/sub?epsId=144044&kkey=...[&lang=id|all]',
+      map: (raw, req) => {
+        const { filterSubtitles } = require('./scraper');
+        return filterSubtitles(raw, req.query?.lang || req.body?.lang || 'en');
+      },
     },
     // ── HTML scrape (fallback) ───────────────────────────────────────
     {

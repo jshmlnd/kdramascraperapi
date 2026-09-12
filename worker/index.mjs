@@ -102,6 +102,45 @@ function countOf(data) {
   return Array.isArray(data) ? data.length : data ? 1 : 0;
 }
 
+// Keep in sync with filterSubtitles() in scraper.js (worker has no deps).
+const SUB_LANG_ALIASES = {
+  en: ['en', 'eng', 'english'],
+  id: ['id', 'ind', 'indonesian', 'bahasa'],
+  ms: ['ms', 'malay', 'melayu'],
+  ar: ['ar', 'arabic'],
+  hi: ['hi', 'hindi'],
+  es: ['es', 'spanish', 'espanol'],
+  pt: ['pt', 'portuguese'],
+  fr: ['fr', 'french'],
+  de: ['de', 'german'],
+  th: ['th', 'thai'],
+  vi: ['vi', 'vietnamese'],
+  zh: ['zh', 'chinese'],
+  ko: ['ko', 'korean'],
+  ja: ['ja', 'japanese'],
+};
+
+function filterSubtitles(subs, lang = 'en') {
+  if (!Array.isArray(subs)) return subs;
+  if (String(lang).toLowerCase() === 'all') return subs;
+  const want = String(lang).toLowerCase();
+  let accepted = [want];
+  for (const aliases of Object.values(SUB_LANG_ALIASES)) {
+    if (aliases.includes(want)) {
+      accepted = aliases;
+      break;
+    }
+  }
+  const match = (label) =>
+    String(label || '')
+      .toLowerCase()
+      .split(/[^a-z]+/)
+      .filter(Boolean)
+      .some((t) => accepted.includes(t));
+  const languages = [...new Set(subs.map((s) => s?.label).filter(Boolean))];
+  return { data: subs.filter((s) => match(s?.label)), languages, lang: want };
+}
+
 const ROUTES = [
   {
     path: '/api/search',
@@ -169,7 +208,8 @@ const ROUTES = [
   {
     path: '/api/sub',
     ttl: TTL.sub,
-    desc: 'Subtitles [{src,label}] – GET /api/sub?epsId=144044&kkey=...',
+    desc: 'Subtitles, English-only by default – GET /api/sub?epsId=144044&kkey=...[&lang=id|all]',
+    map: (raw, reqUrl) => filterSubtitles(raw, reqUrl.searchParams.get('lang') || 'en'),
     build: (base, u, env) => {
       const epsId = u.searchParams.get('epsId') || u.searchParams.get('ep') || '';
       if (!epsId) throw Object.assign(new Error('Missing required query param: epsId'), { status: 400 });
@@ -237,7 +277,17 @@ export default {
     }
 
     try {
-      const { res: data, hit } = await cached(request, ctx, route.ttl, () => upstream(target, env));
+      const { res: raw, hit } = await cached(request, ctx, route.ttl, () => upstream(target, env));
+      let data = raw;
+      let extra = {};
+      if (typeof route.map === 'function') {
+        const m = route.map(raw, u, env);
+        if (m && typeof m === 'object' && !Array.isArray(m) && 'data' in m) {
+          ({ data, ...extra } = m);
+        } else {
+          data = m;
+        }
+      }
       return json(
         {
           success: true,
@@ -245,6 +295,7 @@ export default {
           source: target,
           count: countOf(data),
           data,
+          ...extra,
           tookMs: Date.now() - start,
         },
         { headers: { 'X-Cache': hit ? 'HIT' : 'MISS' } },
