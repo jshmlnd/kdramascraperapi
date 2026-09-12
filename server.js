@@ -307,6 +307,18 @@ app.get('/', (_req, res) => {
           kind: 'api',
           description: 'Mint stream/sub kkeys – GET /api/kkey?dramaId=8409&epsId=144044 (needs Playwright)',
         },
+        {
+          method: 'GET',
+          path: '/api/stream',
+          kind: 'api',
+          description: 'Proxy .m3u8 with CORS + Referer, rewrites segments – GET /api/stream?src=<m3u8>',
+        },
+        {
+          method: 'GET',
+          path: '/api/segment',
+          kind: 'api',
+          description: 'Proxy segment/key bytes with CORS + Referer – GET /api/segment?src=<ts|key>',
+        },
       ]),
     cache: cacheEnabled ? { enabled: true, ttl: cacheTtl, keys: cache.keys().length } : { enabled: false },
     docs: 'Edit api.config.js to customize GET/POST endpoints. Restart server after changes.',
@@ -384,6 +396,71 @@ app.get('/api/kkey', async (req, res) => {
   }
 });
 
+// ── Stream proxy (fixes CDN hotlink/CORS blocks) ───────────────────────
+// Browsers can't set Referer, and the CDN typically 403s foreign origins
+// and omits CORS headers – so hls.js fails loading segments directly.
+// Proxy through here instead: playlist URIs are rewritten to /api/segment
+// (or nested /api/stream for master playlists), served same-origin with
+// CORS * and upstream Referer injected server-side.
+//   GET /api/stream?src=<url-encoded .m3u8 from /api/episode>
+//   GET /api/segment?src=<url-encoded segment/key/init URL>
+const { checkMediaSrc, proxyPlaylistUrls } = require('./scraper');
+
+function proxyBase(req) {
+  return `${req.protocol}://${req.get('host')}`;
+}
+
+app.get('/api/stream', async (req, res) => {
+  const src = req.query?.src || req.query?.url || '';
+  const bad = checkMediaSrc(src, ['.m3u8']);
+  if (bad) return res.status(400).json({ success: false, error: bad });
+  try {
+    const upstream = await apiHttp.get(src, {
+      headers: { Referer: `${getBase()}/`, Origin: getBase() },
+      responseType: 'text',
+      maxContentLength: 10 * 1024 * 1024,
+    });
+    if (upstream.status >= 400) {
+      return res.status(502).json({ success: false, error: `Upstream ${upstream.status} for playlist`, source: src });
+    }
+    const out = proxyPlaylistUrls(String(upstream.data), src, proxyBase(req));
+    res.set('Content-Type', 'application/vnd.apple.mpegurl');
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Cache-Control', 'public, max-age=30');
+    res.send(out);
+  } catch (e) {
+    console.error('[GET /api/stream] failed:', e.message);
+    res.status(502).json({ success: false, error: 'Playlist proxy failed', details: e.message, source: src });
+  }
+});
+
+app.get('/api/segment', (req, res) => {
+  const src = req.query?.src || req.query?.url || '';
+  const bad = checkMediaSrc(src, ['.ts', '.m4s', '.mp4', '.aac', '.key', '.vtt', '.mpd']);
+  if (bad) return res.status(400).json({ success: false, error: bad });
+  const headers = { Referer: `${getBase()}/`, Origin: getBase() };
+  if (req.headers.range) headers.Range = req.headers.range;
+  apiHttp
+    .get(src, { headers, responseType: 'stream', timeout: 30000, validateStatus: () => true })
+    .then((upstream) => {
+      if (upstream.status >= 400) {
+        return res.status(502).json({ success: false, error: `Upstream ${upstream.status} for segment`, source: src });
+      }
+      res.status(upstream.status);
+      for (const h of ['content-type', 'content-length', 'content-range', 'accept-ranges', 'cache-control']) {
+        if (upstream.headers[h]) res.set(h, upstream.headers[h]);
+      }
+      if (!res.get('Cache-Control')) res.set('Cache-Control', 'public, max-age=300');
+      res.set('Access-Control-Allow-Origin', '*');
+      upstream.data.on('error', () => res.destroy());
+      upstream.data.pipe(res);
+    })
+    .catch((e) => {
+      console.error('[GET /api/segment] failed:', e.message);
+      if (!res.headersSent) res.status(502).json({ success: false, error: 'Segment proxy failed', details: e.message, source: src });
+    });
+});
+
 // ── Boot ─────────────────────────────────────────────────────────────
 validateConfig();
 registerEndpoints();
@@ -395,7 +472,7 @@ app.use((req, res) => {
     error: 'Not found',
     available: config.endpoints
       .map((e) => `${e.method} ${e.path}`)
-      .concat(['GET /api/kkey', 'GET /', 'GET /health']),
+      .concat(['GET /api/kkey', 'GET /api/stream', 'GET /api/segment', 'GET /', 'GET /health']),
   });
 });
 

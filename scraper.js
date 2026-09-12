@@ -170,6 +170,51 @@ function episodePageUrl(base, { title, dramaId, epsNum, epsId }) {
   return `${base}/Drama/${slug}/Episode-${epsNum}?id=${encodeURIComponent(String(dramaId))}&ep=${encodeURIComponent(String(epsId))}&page=0&pageSize=100`;
 }
 
+// ── HLS playlist rewriting (stream proxy) ──────────────────────────────
+// Rewrites segment/key/init URIs in an .m3u8 to same-origin proxy URLs so
+// browsers avoid CDN CORS/hotlink blocks. Nested .m3u8 URIs point back at
+// the playlist proxy; everything else points at the byte proxy.
+function checkMediaSrc(src, allowedExts) {
+  if (!src) return 'Missing required query param: src';
+  let u;
+  try {
+    u = new URL(src);
+  } catch {
+    return 'Invalid src URL';
+  }
+  if (!['http:', 'https:'].includes(u.protocol)) return 'src must be http(s)';
+  if (!isSafeUrl(src)) return 'src host not allowed';
+  const path = u.pathname.toLowerCase();
+  if (!allowedExts.some((ext) => path.endsWith(ext))) return `src must end with ${allowedExts.join('/')}`;
+  return null;
+}
+
+function rewritePlaylist(text, m3u8Url, toProxy) {
+  return String(text)
+    .split('\n')
+    .map((line) => {
+      const t = line.trim();
+      if (!t) return line;
+      if (t.startsWith('#')) return line.replace(/URI="([^"]+)"/g, (m, uri) => `URI="${toProxy(uri)}"`);
+      // bare URI line (relative or absolute)
+      return toProxy(t);
+    })
+    .join('\n');
+}
+
+function proxyPlaylistUrls(text, m3u8Url, proxyBase) {
+  return rewritePlaylist(text, m3u8Url, (uri) => {
+    let abs;
+    try {
+      abs = new URL(uri, m3u8Url).toString();
+    } catch {
+      return uri;
+    }
+    const isList = abs.toLowerCase().split('?')[0].endsWith('.m3u8');
+    return `${proxyBase}/api/${isList ? 'stream' : 'segment'}?src=${encodeURIComponent(abs)}`;
+  });
+}
+
 async function mintKkeys({ pageUrl, timeoutMs = 30000 }) {
   if (!isSafeUrl(pageUrl)) {
     const err = new Error(`Blocked unsafe URL: ${pageUrl}`);
@@ -291,4 +336,4 @@ async function scrape(opts) {
   return results;
 }
 
-module.exports = { http, fetchStatic, fetchRendered, fetchHtml, scrape, extractField, isSafeUrl, closeBrowser, mintKkeys, slugify, episodePageUrl };
+module.exports = { http, fetchStatic, fetchRendered, fetchHtml, scrape, extractField, isSafeUrl, closeBrowser, mintKkeys, slugify, episodePageUrl, checkMediaSrc, rewritePlaylist, proxyPlaylistUrls };
