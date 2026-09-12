@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: kdramascraperapi
+    runtime: node
+    plan: free
+    buildCommand: npm install --omit=optional
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: SOURCE_URL
+        value: https://kisskh.do
+      # Optional – uncomment/set in dashboard after first deploy:
+      # - key: KISSKH_STREAM_KEY
+      #   sync: false
+      # - key: KISSKH_SUB_KEY
+      #   sync: false
+      # - key: CACHE_CLEAR_TOKEN
+      #   sync: false

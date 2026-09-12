@@ -1,0 +1,9 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "kdrama-api",
+  "main": "worker/index.mjs",
+  "compatibility_date": "2026-09-01",
+  "vars": {
+    "SOURCE_URL": "https://kisskh.do"
+  }
+}
